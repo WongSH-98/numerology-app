@@ -10,6 +10,8 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Sparkles, User, Briefcase, Star } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getNumerologyData } from '@/utils/numerology';
+import { useAuth } from '@/contexts/AuthContext';
+import { numerology } from '@/lib/supabase';
 
 interface UserData {
   dateOfBirth: string;
@@ -20,18 +22,39 @@ interface UserData {
 export default function ResultsScreen() {
   const [userData, setUserData] = useState<UserData | null>(null);
   const [numerologyData, setNumerologyData] = useState<any>(null);
+  const [aiSummary, setAiSummary] = useState<string | null>(null);
+  const { user } = useAuth();
 
   useEffect(() => {
     loadUserData();
-  }, []);
+  }, [user]);
 
   const loadUserData = async () => {
     try {
-      const data = await AsyncStorage.getItem('numerologyData');
-      if (data) {
-        const parsed = JSON.parse(data);
+      // Prefer fetching the latest saved calculation from Supabase if logged in
+      if (user) {
+        const { data, error } = await numerology.getUserCalculations(user.id);
+        if (!error && data && data.length > 0) {
+          const latest = data[0];
+          const lifePath = latest.life_path_number as number;
+          setUserData({
+            dateOfBirth: latest.date_of_birth,
+            lifePathNumber: lifePath,
+            calculatedAt: latest.calculated_at,
+          });
+          setNumerologyData(getNumerologyData(lifePath));
+          setAiSummary(latest.notes ?? null);
+          return;
+        }
+      }
+
+      // Fallback to local storage (legacy path)
+      const dataStr = await AsyncStorage.getItem('numerologyData');
+      if (dataStr) {
+        const parsed = JSON.parse(dataStr);
         setUserData(parsed);
         setNumerologyData(getNumerologyData(parsed.lifePathNumber));
+        setAiSummary(parsed.aiSummary ?? null);
       }
     } catch (error) {
       console.error('Error loading user data:', error);
@@ -72,6 +95,18 @@ export default function ResultsScreen() {
               <Text style={styles.title}>Your Life Path Number</Text>
               <Text style={styles.subtitle}>{numerologyData.name}</Text>
             </View>
+
+            {aiSummary ? (
+              <View style={styles.section}>
+                <View style={styles.sectionHeader}>
+                  <Sparkles size={24} color="#F59E0B" strokeWidth={2} />
+                  <Text style={styles.sectionTitle}>AI Summary</Text>
+                </View>
+                <View style={styles.card}>
+                  <Text style={styles.cardText}>{aiSummary}</Text>
+                </View>
+              </View>
+            ) : null}
 
             <View style={styles.section}>
               <View style={styles.sectionHeader}>

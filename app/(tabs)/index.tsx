@@ -6,18 +6,26 @@ import {
   TouchableOpacity,
   SafeAreaView,
   Alert,
+  Platform,
+  ScrollView,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Calendar, Sparkles } from 'lucide-react-native';
+import { Calendar, Sparkles, LogOut } from 'lucide-react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
-import { Platform } from 'react-native';
+
 import { router } from 'expo-router';
 import { calculateLifePathNumber } from '@/utils/numerology';
+import { useAuth } from '@/contexts/AuthContext';
+import { numerology } from '@/lib/supabase';
+import { generateNumerology } from '@/lib/ai';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export default function HomeScreen() {
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const [showDatePicker, setShowDatePicker] = useState(false);
+  const { user, signOut } = useAuth();
+
+  console.log('HomeScreen: Current user:', user ? user.email : 'none');
 
   const onDateChange = (event: any, date?: Date) => {
     if (Platform.OS === 'android') {
@@ -28,19 +36,73 @@ export default function HomeScreen() {
     }
   };
 
-  const handleCalculate = async () => {
+  const handleLogout = async () => {
     try {
-      const lifePathNumber = calculateLifePathNumber(selectedDate);
-      const userData = {
-        dateOfBirth: selectedDate.toISOString(),
-        lifePathNumber,
-        calculatedAt: new Date().toISOString(),
-      };
-      
-      await AsyncStorage.setItem('numerologyData', JSON.stringify(userData));
-      router.push('/results');
+      await signOut();
+      // The AuthContext will automatically redirect to auth screens
     } catch (error) {
-      Alert.alert('Error', 'Failed to calculate your numerology. Please try again.');
+      console.error('Error signing out:', error);
+      Alert.alert('Error', 'Failed to sign out. Please try again.');
+    }
+  };
+
+  const handleCalculate = async () => {
+    if (!user) {
+      Alert.alert('Authentication Required', 'Please sign in to save your numerology calculations.');
+      router.push('/auth/login');
+      return;
+    }
+
+    try {
+      const dobStr = selectedDate.toISOString().split('T')[0]; // YYYY-MM-DD
+
+      // Call AI numerology (Edge Function backed by OpenAI). Continue gracefully if it fails.
+      const ai = await generateNumerology(dobStr);
+      if (!ai) {
+        console.warn('AI numerology unavailable, falling back to local life path only');
+      }
+
+      // Fallback in case AI fails to provide life_path_number
+      const lifePathNumber = ai?.life_path_number ?? calculateLifePathNumber(selectedDate);
+
+      const calculationData: any = {
+        user_id: user.id,
+        date_of_birth: dobStr,
+        life_path_number: lifePathNumber,
+        birth_day_number: ai?.birth_day_number ?? null,
+        expression_number: ai?.expression_number ?? null,
+        soul_urge_number: ai?.soul_urge_number ?? null,
+        personality_number: ai?.personality_number ?? null,
+        notes: ai?.summary ?? null,
+        calculated_at: new Date().toISOString(),
+      };
+
+      const { error } = await numerology.saveCalculation(calculationData);
+      if (error) {
+        console.error('Error saving calculation:', error);
+        Alert.alert('Error', 'Failed to save your calculation. Please try again.');
+        return;
+      }
+
+      // Persist locally for the results screen fallback/offline
+      await AsyncStorage.setItem(
+        'numerologyData',
+        JSON.stringify({
+          dateOfBirth: dobStr,
+          lifePathNumber,
+          calculatedAt: calculationData.calculated_at,
+          aiSummary: calculationData.notes ?? null,
+        })
+      );
+
+      if (!ai) {
+        Alert.alert('AI Unavailable', 'Generated your Life Path Number locally. AI insights will appear when available.');
+      }
+
+      router.push('/results');
+    } catch (error: any) {
+      console.error('Error calculating numerology:', error);
+      Alert.alert('Error', error?.message || 'Failed to calculate your numerology. Please try again.');
     }
   };
 
@@ -58,13 +120,25 @@ export default function HomeScreen() {
         colors={['#1F2937', '#374151', '#4B5563']}
         style={styles.gradient}
       >
-        <View style={styles.content}>
+        <ScrollView 
+          style={styles.scrollView}
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+        >
           <View style={styles.header}>
-            <Sparkles size={48} color="#F59E0B" strokeWidth={2} />
+            <View style={styles.headerTop}>
+              <Sparkles size={48} color="#F59E0B" strokeWidth={2} />
+              <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
+                <LogOut size={24} color="#9CA3AF" strokeWidth={2} />
+              </TouchableOpacity>
+            </View>
             <Text style={styles.title}>Discover Your Path</Text>
             <Text style={styles.subtitle}>
               Unlock the mysteries of your personality through numerology
             </Text>
+            {user && (
+              <Text style={styles.userInfo}>Welcome, {user.email}</Text>
+            )}
           </View>
 
           <View style={styles.dateSection}>
@@ -120,10 +194,10 @@ export default function HomeScreen() {
 
           <View style={styles.infoSection}>
             <Text style={styles.infoText}>
-              Your Life Path Number reveals your natural talents, challenges, and the path you're meant to walk in this lifetime.
+              Your Life Path Number reveals your natural talents, challenges, and the path you&apos;re meant to walk in this lifetime.
             </Text>
           </View>
-        </View>
+        </ScrollView>
       </LinearGradient>
     </SafeAreaView>
   );
@@ -136,15 +210,27 @@ const styles = StyleSheet.create({
   gradient: {
     flex: 1,
   },
-  content: {
+  scrollView: {
     flex: 1,
+  },
+  scrollContent: {
     padding: 24,
-    justifyContent: 'space-between',
+    paddingBottom: 40,
   },
   header: {
     alignItems: 'center',
-    marginTop: 40,
-    marginBottom: 40,
+    marginTop: 20,
+    marginBottom: 30,
+  },
+  headerTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    width: '100%',
+    marginBottom: 16,
+  },
+  logoutButton: {
+    padding: 8,
   },
   title: {
     fontSize: 32,
@@ -161,9 +247,15 @@ const styles = StyleSheet.create({
     lineHeight: 24,
     paddingHorizontal: 20,
   },
+  userInfo: {
+    fontSize: 14,
+    color: '#D1D5DB',
+    marginTop: 16,
+    textAlign: 'center',
+  },
   dateSection: {
     alignItems: 'center',
-    marginBottom: 40,
+    marginBottom: 30,
   },
   sectionTitle: {
     fontSize: 18,
@@ -237,6 +329,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(55, 65, 81, 0.7)',
     borderRadius: 12,
     padding: 20,
+    marginTop: 20,
     marginBottom: 20,
   },
   infoText: {
